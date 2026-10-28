@@ -17,12 +17,15 @@ import {
   type HolderStat,
 } from "./api";
 import { chunks, mapPool } from "./asyncPool";
-import { mappingRejected, symbolCompatible } from "./symbols";
+import { isNativeAsset, mappingRejected, symbolCompatible } from "./symbols";
 import type { BoardRow, CapCell, DashboardSnapshot, OiCell, OnchainCell, QuoteCell } from "./types";
 
 const TOP_ONCHAIN = 40;
 const TOP_OI_CONFIRM = 80;
 const TOP_OI_CHANGE = 40;
+const OI_WAITING = "等待币安持仓。";
+const OI_UNAVAILABLE = "没有持仓额。只向币安查询持仓靠前的合约，CoinGecko 也没有这项数据。";
+const NATIVE_ONCHAIN = "原生资产。GoPlus 免费接口只覆盖代币合约，统计不了原生币的持币集中度。";
 
 const onchainCache = new Map<string, { at: number; stat: HolderStat }>();
 const ONCHAIN_TTL = 10 * 60 * 1000;
@@ -149,7 +152,7 @@ function buildRows(binance: BinanceBundle | null, tickers: DerivativeTicker[] | 
           changePct: null,
           source: "coingecko",
         });
-    const oi = cgParts?.oi ?? emptyOi(blocked ? "没有持仓数据。" : "等待币安持仓。", null);
+    const oi = cgParts?.oi ?? emptyOi(blocked ? "没有持仓数据。" : OI_WAITING, null);
     const coinId = ticker?.coinId ?? null;
     return {
       symbol: item.symbol,
@@ -186,9 +189,18 @@ async function confirmBinanceOpenInterest(
   });
   const bySymbol = new Map(values.map((item) => [item.symbol, item.contracts]));
   const next = rows.map((row) => {
-    if (!bySymbol.has(row.symbol)) return row;
+    if (!bySymbol.has(row.symbol)) {
+      if (row.oi.changeDetail !== OI_WAITING) return row;
+      return { ...row, oi: { ...row.oi, changeDetail: OI_UNAVAILABLE } };
+    }
     const contracts = bySymbol.get(row.symbol);
-    if (contracts == null) return row;
+    if (contracts == null) {
+      if (row.oi.changeDetail !== OI_WAITING) return row;
+      return {
+        ...row,
+        oi: { ...row.oi, changeDetail: "币安没有返回该合约的持仓，没有可显示的持仓额。" },
+      };
+    }
     const mark = row.quote.markPrice;
     const notional = mark != null ? contracts * mark : null;
     confirmed.add(row.symbol);
@@ -324,6 +336,32 @@ function holderKey(platform: string, address: string): string {
   return `${platform}:${address}`;
 }
 
+function readOnchainCache(key: string): { fresh: boolean; stat: HolderStat } | null {
+  const hit = onchainCache.get(key);
+  if (!hit) return null;
+  return { fresh: Date.now() - hit.at < ONCHAIN_TTL, stat: hit.stat };
+}
+
+type OnchainTarget =
+  | { action: "empty"; detail: string }
+  | { action: "fetch"; platform: string; address: string };
+
+function onchainTarget(coinId: string, meta: CoinMeta | undefined): OnchainTarget {
+  if (isNativeAsset(coinId)) return { action: "empty", detail: NATIVE_ONCHAIN };
+  if (!meta) return { action: "empty", detail: "CoinGecko 币种列表里没有这个 id，无法定位合约。" };
+  const entries = Object.entries(meta.platforms).filter(([, address]) => address.trim());
+  const first = entries[0];
+  if (!first) return { action: "empty", detail: NATIVE_ONCHAIN };
+  const [platform, address] = first;
+  if (!supportedChain(platform)) {
+    return {
+      action: "empty",
+      detail: `主链是 ${chainLabel(platform)}，GoPlus 免费接口没有覆盖。没有改用其他链上的桥接合约。`,
+    };
+  }
+  return { action: "fetch", platform, address };
+}
+
 function onchainFromStat(stat: HolderStat): OnchainCell {
   if (stat.top10Pct == null && stat.holderCount == null) {
     return emptyChain(`${stat.chainLabel} 合约已找到，但 GoPlus 没有返回持币明细。`);
@@ -360,33 +398,13 @@ function planOnchain(rows: BoardRow[], list: Map<string, CoinMeta> | null, listF
       return { ...row, onchain: emptyChain("币种合约地址表没有加载成功，链上持仓留空。") };
     }
     const meta = list.get(row.coinId);
-    if (!meta) {
-      return { ...row, onchain: emptyChain("CoinGecko 币种列表里没有这个 id，无法定位合约。") };
-    }
-    if (!symbolCompatible(row.base, meta.symbol)) {
+    if (meta && !symbolCompatible(row.base, meta.symbol)) {
       return { ...row, onchain: emptyChain("币种符号和合约标的对不上，没有查询链上持仓。") };
     }
-    const entries = Object.entries(meta.platforms).filter(([, address]) => address.trim());
-    const first = entries[0];
-    if (!first) {
-      return {
-        ...row,
-        onchain: emptyChain("原生资产或未登记代币合约。GoPlus 免费接口统计不了持币集中度。"),
-      };
-    }
-    const [platform, address] = first;
-    if (!supportedChain(platform)) {
-      return {
-        ...row,
-        onchain: emptyChain(
-          `主链是 ${chainLabel(platform)}，GoPlus 免费接口没有覆盖。没有改用其他链上的桥接合约。`,
-        ),
-      };
-    }
-    const cached = onchainCache.get(holderKey(platform, address));
-    if (cached && Date.now() - cached.at < ONCHAIN_TTL) {
-      return { ...row, onchain: onchainFromStat(cached.stat) };
-    }
+    const target = onchainTarget(row.coinId, meta);
+    if (target.action === "empty") return { ...row, onchain: emptyChain(target.detail) };
+    const cached = readOnchainCache(holderKey(target.platform, target.address));
+    if (cached) return { ...row, onchain: onchainFromStat(cached.stat) };
     return { ...row, onchain: pendingChain() };
   });
 }
@@ -394,13 +412,17 @@ function planOnchain(rows: BoardRow[], list: Map<string, CoinMeta> | null, listF
 async function fetchOnchain(rows: BoardRow[], list: Map<string, CoinMeta>, signal?: AbortSignal): Promise<BoardRow[]> {
   const jobs: { platform: string; address: string; key: string; symbols: string[] }[] = [];
   const jobByKey = new Map<string, { platform: string; address: string; key: string; symbols: string[] }>();
+  const top = new Set(sortByNotional(rows).slice(0, TOP_ONCHAIN).map((item) => item.symbol));
   for (const row of rows) {
-    if (row.onchain.status !== "pending" || !row.coinId) continue;
+    if (!row.coinId || !top.has(row.symbol)) continue;
+    if (row.onchain.status !== "pending" && row.onchain.status !== "ok") continue;
     const meta = list.get(row.coinId);
-    const first = meta ? Object.entries(meta.platforms).find(([, address]) => address.trim()) : undefined;
-    if (!first) continue;
-    const [platform, address] = first;
+    if (meta && !symbolCompatible(row.base, meta.symbol)) continue;
+    const target = onchainTarget(row.coinId, meta);
+    if (target.action !== "fetch") continue;
+    const { platform, address } = target;
     const key = holderKey(platform, address);
+    if (readOnchainCache(key)?.fresh) continue;
     const existing = jobByKey.get(key);
     if (existing) {
       existing.symbols.push(row.symbol);
@@ -415,20 +437,25 @@ async function fetchOnchain(rows: BoardRow[], list: Map<string, CoinMeta>, signa
   const bySymbol = new Map<string, OnchainCell>();
   for (const job of jobs) {
     const stat = stats.get(job.key);
+    const previous = onchainCache.get(job.key);
     let cell: OnchainCell;
-    if (stat instanceof Error) {
-      cell = {
-        status: "error",
-        chainLabel: chainLabel(job.platform),
-        holderCount: null,
-        top10Pct: null,
-        top1Pct: null,
-        exchangePct: null,
-        topTag: null,
-        detail: `GoPlus 查询失败（${stat.message}）。没有填入持仓数字。`,
-      };
-    } else if (!stat) {
-      cell = emptyChain("GoPlus 没有返回该合约。");
+    if (stat instanceof Error || !stat) {
+      if (previous) {
+        cell = onchainFromStat(previous.stat);
+      } else if (stat instanceof Error) {
+        cell = {
+          status: "error",
+          chainLabel: chainLabel(job.platform),
+          holderCount: null,
+          top10Pct: null,
+          top1Pct: null,
+          exchangePct: null,
+          topTag: null,
+          detail: `GoPlus 查询失败（${stat.message}）。没有填入持仓数字。`,
+        };
+      } else {
+        cell = emptyChain("GoPlus 没有返回该合约。");
+      }
     } else {
       onchainCache.set(job.key, { at: Date.now(), stat });
       cell = onchainFromStat(stat);

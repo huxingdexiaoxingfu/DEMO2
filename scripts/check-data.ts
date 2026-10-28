@@ -1,5 +1,6 @@
 import { loadDashboard } from "../src/loadDashboard";
-import { mappingRejected, symbolCompatible } from "../src/symbols";
+import { largestHolderTag } from "../src/api";
+import { isNativeAsset, mappingRejected, symbolCompatible } from "../src/symbols";
 
 function assert(condition: unknown, message: string): asserts condition {
   if (!condition) throw new Error(message);
@@ -10,6 +11,11 @@ assert(symbolCompatible("1000PEPE", "pepe"), "1000PEPE 应对上 pepe");
 assert(symbolCompatible("1000SATS", "1000sats"), "1000SATS 应对上 1000sats");
 assert(symbolCompatible("1MBABYDOGE", "babydoge"), "1MBABYDOGE 应对上 babydoge");
 assert(!symbolCompatible("PUMP", "pumpbtc"), "PUMP 不应对上 pumpbtc");
+assert(isNativeAsset("binancecoin"), "BNB 应视为原生资产");
+assert(!isNativeAsset("pepe"), "PEPE 不是原生资产");
+assert(!isNativeAsset("uniswap"), "UNI 不是原生资产");
+assert(largestHolderTag([{ pct: 0.5, tag: "" }, { pct: 0.2, tag: "Binance" }]) === null, "最大地址没标签时不应借用后面的标签");
+assert(largestHolderTag([{ pct: 0.2, tag: "Binance" }, { pct: 0.6, tag: "OKX" }]) === "OKX", "标签应属于最大地址");
 assert(mappingRejected(75_000_000, 1_200_000), "持仓额远大于过小市值时应拒绝映射");
 assert(!mappingRejected(85_000_000, 1_800_000_000), "正常市值不应被拒绝");
 assert(!mappingRejected(7_900_000_000, 1_600_000_000_000), "BTC 量级不应被拒绝");
@@ -38,6 +44,12 @@ if (!snapshot.binanceOk) {
   assert(btc.quote.markPrice != null && btc.quote.markPrice > 0, "币安可用时应有标记价");
   assert(btc.oi.source === "binance", "币安可用时 BTC 持仓应来自币安");
   assert(!btc.oi.contractsEstimated, "币安持仓量不应标成估算");
+}
+
+const bnb = snapshot.rows.find((row) => row.symbol === "BNBUSDT");
+if (bnb) {
+  assert(bnb.onchain.status === "empty", "BNB 是原生资产，不应使用封装合约的持仓");
+  assert(bnb.onchain.top10Pct == null, "BNB 链上占比应为空");
 }
 
 const xau = snapshot.rows.find((row) => row.symbol === "XAUUSDT");

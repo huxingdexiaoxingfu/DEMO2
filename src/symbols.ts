@@ -27,3 +27,58 @@ export function mappingRejected(oiNotional: number | null, marketCap: number | n
   if (!(marketCap > 0) || !(oiNotional > 0)) return false;
   return marketCap < 100_000_000 && oiNotional > marketCap * 8;
 }
+
+/**
+ * CoinGecko ids whose canonical asset is a native chain coin. Their `platforms`
+ * entries are wrapped or bridged contracts, not the native holder set.
+ * BNB, for example, only lists the Ethereum ERC-20.
+ */
+const NATIVE_ASSET_IDS = new Set([
+  "algorand",
+  "aptos",
+  "avalanche-2",
+  "binancecoin",
+  "bitcoin",
+  "bitcoin-cash",
+  "bittensor",
+  "cardano",
+  "celestia",
+  "cosmos",
+  "crypto-com-chain",
+  "dash",
+  "dogecoin",
+  "eos",
+  "ethereum",
+  "ethereum-classic",
+  "fantom",
+  "filecoin",
+  "hedera-hashgraph",
+  "hyperliquid",
+  "injective-protocol",
+  "internet-computer",
+  "iota",
+  "kaspa",
+  "litecoin",
+  "mantle",
+  "matic-network",
+  "monero",
+  "near",
+  "neo",
+  "polkadot",
+  "polygon-ecosystem-token",
+  "ripple",
+  "sei-network",
+  "solana",
+  "stellar",
+  "sui",
+  "tezos",
+  "the-open-network",
+  "thorchain",
+  "tron",
+  "vechain",
+  "zcash",
+]);
+
+export function isNativeAsset(coinId: string | null | undefined): boolean {
+  return coinId != null && NATIVE_ASSET_IDS.has(coinId);
+}

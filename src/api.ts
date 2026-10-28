@@ -456,6 +456,19 @@ export function openInterestChange(points: HistPoint[]): { pct: number; detail: 
   return { pct, detail };
 }
 
+export function largestHolderTag(holders: readonly { pct: number; tag: string }[]): string | null {
+  const tag = largestHolder(holders)?.tag.trim() ?? "";
+  return tag ? tag : null;
+}
+
+function largestHolder<T extends { pct: number }>(holders: readonly T[]): T | undefined {
+  let largest: T | undefined;
+  for (const holder of holders) {
+    if (!largest || holder.pct > largest.pct) largest = holder;
+  }
+  return largest;
+}
+
 function parseFraction(value: unknown): number | null {
   const parsed = num(value);
   if (parsed == null || parsed < 0) return null;
@@ -499,10 +512,11 @@ export async function loadHolderStat(
   }
   const top = holders.slice(0, 10);
   const top10 = top.length ? top.reduce((sum, item) => sum + item.pct, 0) : null;
-  const top1 = top[0]?.pct ?? null;
+  const largest = largestHolder(top);
+  const top1 = largest?.pct ?? null;
   const tagged = top.filter((item) => item.tag && EXCHANGE_TAG.test(item.tag));
   const exchangePct = tagged.length ? tagged.reduce((sum, item) => sum + item.pct, 0) : 0;
-  const topTag = top.find((item) => item.tag)?.tag ?? null;
+  const topTag = largestHolderTag(top);
   return {
     chainLabel: chain.label,
     holderCount: num(token.holder_count),
